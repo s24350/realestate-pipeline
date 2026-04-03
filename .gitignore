@@ -1,19 +1,32 @@
+# Data files — never commit large source files
+data/
+postgres_data/
+*.csv
+*.xlsx
+*.json
+
+# Keep folder structure in git without the files
+!data/.gitkeep
+!data/land_registry/.gitkeep
+!data/boe/.gitkeep
+!data/mlar/.gitkeep
+
 # Python
 __pycache__/
-*.pyc
-*.pyo
-
-# Environment
-.env
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
 
 # IDE
 .idea/
 .vscode/
 
-# IDE
-.vscode/
-.idea/
+# Docker local volumes
+postgres-data/
 
-# OS
-.DS_Store
-Thumbs.db
+# Airflow local logs
+logs/
+
+# JDBC driver jar (downloaded separately, too large for git)
+jars/
