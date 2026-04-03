@@ -6,10 +6,9 @@ postgres_data/
 *.json
 
 # Keep folder structure in git without the files
-!data/.gitkeep
-!data/land_registry/.gitkeep
-!data/boe/.gitkeep
-!data/mlar/.gitkeep
+!data/
+!data/*/
+!data/**/.gitkeep
 
 # Python
 __pycache__/
