@@ -96,31 +96,31 @@ CREATE TABLE IF NOT EXISTS gold.housing_credit_summary (
     quarter_label                                   TEXT,
 
     -- Land Registry aggregates
-    transactions_total__LR__count                   BIGINT,
-    price_avg__LR__gbp                              NUMERIC(18,2),
-    price_median__LR__gbp                           NUMERIC(18,2),
-    price_min__LR__gbp                              NUMERIC(18,2),
-    price_max__LR__gbp                              NUMERIC(18,2),
+    "transactions_total__LR__count"                 BIGINT,
+    "price_avg__LR__gbp"                            NUMERIC(18,2),
+    "price_median__LR__gbp"                         NUMERIC(18,2),
+    "price_min__LR__gbp"                            NUMERIC(18,2),
+    "price_max__LR__gbp"                            NUMERIC(18,2),
 
     -- BoE aggregates (averaged across months in the quarter)
-    boe_house_purchase__LPMVTVX__count              NUMERIC,
-    boe_remortgage__LPMB4B3__count                  NUMERIC,
-    boe_total_secured_lending__LPMB3C8__count        NUMERIC,
-    boe_mfi_total_approvals__LPMZ3UP__count         NUMERIC,
+    "boe_house_purchase__LPMVTVX__count"            NUMERIC,
+    "boe_remortgage__LPMB4B3__count"                NUMERIC,
+    "boe_total_secured_lending__LPMB3C8__count"     NUMERIC,
+    "boe_mfi_total_approvals__LPMZ3UP__count"       NUMERIC,
 
     -- MLAR figures (already ×1,000,000 in silver)
-    mlar_gross_advances__MLAR_1_21_C_1__gbp         NUMERIC,
-    mlar_net_advances__MLAR_1_21_C_2__gbp           NUMERIC,
-    mlar_new_commitments__MLAR_1_21_C_3__gbp        NUMERIC,
-    mlar_imp_repayment__MLAR_1_32_C_3__pct          NUMERIC(6,3),
-    mlar_imp_interest_only__MLAR_1_32_C_4__pct      NUMERIC(6,3),
-    mlar_new_house_purchase__MLAR_1_33_C_29__gbp    NUMERIC,
-    mlar_new_remortgage__MLAR_1_33_C_30__gbp        NUMERIC,
+    "mlar_gross_advances__MLAR_1_21_C_1__gbp"       NUMERIC,
+    "mlar_net_advances__MLAR_1_21_C_2__gbp"         NUMERIC,
+    "mlar_new_commitments__MLAR_1_21_C_3__gbp"      NUMERIC,
+    "mlar_imp_repayment__MLAR_1_32_C_3__pct"        NUMERIC(6,3),
+    "mlar_imp_interest_only__MLAR_1_32_C_4__pct"    NUMERIC(6,3),
+    "mlar_new_house_purchase__MLAR_1_33_C_29__gbp"  NUMERIC,
+    "mlar_new_remortgage__MLAR_1_33_C_30__gbp"      NUMERIC,
 
     -- Data quality flags
-    source_available_lr__flag                        BOOLEAN,
-    source_available_boe__flag                       BOOLEAN,
-    source_available_mlar__flag                      BOOLEAN,
+    "source_available_lr__flag"                      BOOLEAN,
+    "source_available_boe__flag"                     BOOLEAN,
+    "source_available_mlar__flag"                    BOOLEAN,
 
     loaded_at                                       TIMESTAMP NOT NULL DEFAULT NOW()
 );
