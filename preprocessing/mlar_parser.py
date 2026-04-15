@@ -1,11 +1,15 @@
 """
 preprocessing/mlar_parser.py
 -----------------------------
-Converts the MLAR Excel workbook (mlar-longrun-detailed.XLSX) into three
-flat CSV files: mlar_1_21.csv, mlar_1_32.csv, mlar_1_33.csv.
+Converts the MLAR Excel workbook (mlar-longrun-detailed.XLSX) into a single
+long-format CSV file: mlar_long_raw.csv
 
-Adapted from v1 — same logic, same mapping files.
-Changes: paths from config.py, added parse_all() for DAG.
+Adapted from v1 — same parsing logic, same mapping files.
+Changes from v2:
+  - Output is one long-format CSV (src, category, quarter, value)
+    instead of three wide CSVs
+  - This simplifies the bronze table (fixed 4-column schema, no dynamic quarters)
+  - Added parse_all() for the Airflow DAG
 """
 
 import logging
@@ -99,28 +103,56 @@ def preprocess(xlsx_path: Path, config: dict) -> pd.DataFrame:
     return df_result
 
 
-def parse_all() -> list[str]:
-    """Parse all three MLAR sheets and save as CSVs. Called by the DAG."""
+def parse_all() -> str:
+    """
+    Parse all three MLAR sheets, transpose to long format,
+    and save as one CSV. Called by the Airflow DAG.
+    Returns the output file path.
+    """
     xlsx_path, output_dir = _get_paths()
 
     if not xlsx_path.exists():
         raise FileNotFoundError(f"MLAR XLSX not found: {xlsx_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_files = []
+    all_long = []
 
     for config in SHEET_CONFIGS:
-        df_result = preprocess(xlsx_path, config)
-        if df_result is not None and not df_result.empty:
-            sheet_name = config["sheet_name"].replace(".", "_")
-            output_path = output_dir / f"mlar_{sheet_name}.csv"
-            df_result.to_csv(output_path, index=False)
-            logger.info("Saved: %s (%d rows)", output_path, len(df_result))
-            output_files.append(str(output_path))
+        df_wide = preprocess(xlsx_path, config)
+        if df_wide is None or df_wide.empty:
+            logger.warning("No data for sheet %s", config["sheet_name"])
+            continue
 
-    return output_files
+        # Transpose: wide → long
+        # Columns: category + quarter columns (2007Q1, 2007Q2, ...)
+        quarter_cols = [c for c in df_wide.columns if c != "category"]
+        df_long = df_wide.melt(
+            id_vars=["category"],
+            value_vars=quarter_cols,
+            var_name="quarter",
+            value_name="value",
+        )
+        df_long["src"] = config["sheet_name"]
+
+        # Reorder to match bronze table: src, category, quarter, value
+        df_long = df_long[["src", "category", "quarter", "value"]]
+
+        all_long.append(df_long)
+        logger.info(
+            "Sheet %s: %d categories × %d quarters = %d rows",
+            config["sheet_name"],
+            len(df_wide),
+            len(quarter_cols),
+            len(df_long),
+        )
+
+    combined = pd.concat(all_long, ignore_index=True)
+    output_path = output_dir / "mlar_long_raw.csv"
+    combined.to_csv(output_path, index=False)
+    logger.info("Saved: %s (%d total rows)", output_path, len(combined))
+    return str(output_path)
 
 
 if __name__ == "__main__":
-    files = parse_all()
-    logger.info("Done. Created %d file(s).", len(files))
+    path = parse_all()
+    logger.info("Done. Output: %s", path)
