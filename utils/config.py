@@ -24,7 +24,6 @@ JDBC_URL: str = (
     f"jdbc:postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 JDBC_DRIVER_CLASS: str = "org.postgresql.Driver"
-# Path to the Postgres JDBC driver jar (mounted into the Airflow container)
 JDBC_JAR_PATH: str = os.environ.get(
     "JDBC_JAR_PATH",
     "/opt/airflow/jars/postgresql-42.7.3.jar",
@@ -40,14 +39,19 @@ JDBC_PROPERTIES: dict = {
 KAFKA_BOOTSTRAP_SERVERS: str = os.environ.get(
     "KAFKA_BOOTSTRAP_SERVERS", "localhost:29092"
 )
-KAFKA_TOPIC: str = os.environ.get("KAFKA_TOPIC", "file-events")
 KAFKA_GROUP_ID: str = "realestate-pipeline"
 
+# Source-specific topics
+KAFKA_TOPIC_LAND_REGISTRY: str = "land-registry-data"
+KAFKA_TOPIC_BOE: str = "boe-data"
+KAFKA_TOPIC_MLAR: str = "mlar-data"
+
+# Legacy topic (kept for backward compatibility / audit log)
+KAFKA_TOPIC: str = os.environ.get("KAFKA_TOPIC", "file-events")
+
 # ── Data paths ────────────────────────────────────────────────────────────────
-# Base data dir — inside container it's /opt/airflow/data, locally ./data
 _BASE_DATA: str = os.environ.get("BASE_DATA_PATH", "data")
 
-# Each source has its own subdirectory under data/
 LAND_REGISTRY_PATH: str = os.environ.get(
     "LAND_REGISTRY_PATH", f"{_BASE_DATA}/land_registry"
 )
@@ -59,15 +63,11 @@ MLAR_PATH: str = os.environ.get(
 )
 
 # ── Source file names ─────────────────────────────────────────────────────────
-# Full history file (used in full mode)
 LAND_REGISTRY_FILENAME: str      = "pp-complete.csv"
-# Monthly update file (used in incremental mode for Land Registry)
 LAND_REGISTRY_MONTHLY_FILENAME: str = "pp-monthly-update-new-version.csv"
 BOE_FILENAME: str                = "Bank of England  Database.csv"
 MLAR_XLSX_FILENAME: str          = "mlar-longrun-detailed.XLSX"
-MLAR_1_21_FILENAME: str          = "mlar_1_21.csv"
-MLAR_1_32_FILENAME: str          = "mlar_1_32.csv"
-MLAR_1_33_FILENAME: str          = "mlar_1_33.csv"
+MLAR_LONG_RAW_FILENAME: str      = "mlar_long_raw.csv"
 
 # ── Spark ─────────────────────────────────────────────────────────────────────
 SPARK_APP_NAME: str = "realestate-pipeline"
