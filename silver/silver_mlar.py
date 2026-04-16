@@ -1,22 +1,19 @@
 """
 silver/silver_mlar.py
 ---------------------
-Silver-layer transformation for the MLAR dataset (all three sheets:
-1.21, 1.32, 1.33), which arrive as CSV files after mlar_parser.py
-has converted them from the original Excel.
+Silver-layer transformation for the MLAR dataset.
 
-The CSVs are in wide format: one column per quarter (e.g. "2007Q1").
-This script unpivots them into the long format used in Silver:
-    (src, category, quarter_start, value)
+Reads from bronze.mlar_raw (PostgreSQL) via PySpark JDBC.
+Bronze data is already in long format (src, category, quarter, value)
+thanks to the transposing mlar_parser.py. No unpivot/stack needed here.
 
-Changes vs. v1:
-  - Unpivot / melt done in PySpark (not SQL UNNEST)
-  - Type casting via try_cast (no regex)
-  - quarter_start and quarter_label derived in Silver
+Transformations:
+  - Type casting: value TEXT → NUMERIC via try_cast
+  - Monetary values (sheets 1.21, 1.33) multiplied by 1,000,000
+  - Temporal columns derived from quarter label (e.g. "2007Q1" → quarter_start DATE)
   - Idempotent upsert on merge key: (src, category, quarter_start)
-  - Incremental mode: filter to quarter_start > filter_date
-  - MLAR monetary values multiplied by 1,000,000 (source is £m)
-    — moved here from Gold so Silver already holds full GBP values
+
+Watermark: MAX(quarter_start) — quarter-level granularity.
 """
 
 import logging
@@ -26,7 +23,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DateType, StringType
 
-from utils.config import MLAR_PATH, JDBC_URL, JDBC_PROPERTIES
+from utils.config import JDBC_URL, JDBC_PROPERTIES
 from utils.spark_session import get_spark
 from utils.db import get_conn, drop_staging_table
 from utils.watermark import get_filter_date, set_watermark
@@ -36,13 +33,7 @@ logger = logging.getLogger(__name__)
 
 STAGING_TABLE = "silver._staging_mlar"
 TARGET_TABLE  = "silver.mlar_long"
-
-# Sheets and their source CSV filenames
-MLAR_SOURCES = {
-    "1.21": "mlar_1_21.csv",
-    "1.32": "mlar_1_32.csv",
-    "1.33": "mlar_1_33.csv",
-}
+BRONZE_TABLE  = "bronze.mlar_raw"
 
 # Sheets 1.21 and 1.33 contain monetary values in £m → multiply by 1e6
 MONETARY_SOURCES = {"1.21", "1.33"}
@@ -53,69 +44,30 @@ SILVER_COLUMNS = [
 ]
 
 
-def _is_quarter_column(col_name: str) -> bool:
-    """Check if a column name matches the pattern ####Q# (e.g. 2007Q1)."""
-    return (
-        len(col_name) == 6
-        and col_name[:4].isdigit()
-        and col_name[4] == "Q"
-        and col_name[5] in "1234"
-    )
+def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
+    logger.info("Reading MLAR from bronze: %s", BRONZE_TABLE)
 
-
-def _transform_one_source(
-    spark: SparkSession,
-    src_name: str,
-    filename: str,
-    filter_date: date | None,
-) -> DataFrame:
-    path = f"{MLAR_PATH}/{filename}"
-    logger.info("Reading MLAR source %s from: %s", src_name, path)
-
-    df = (
-        spark.read
-        .option("header", "true")
-        .option("inferSchema", "false")
-        .csv(path)
-    )
-
-    # Identify which columns are quarter columns vs. the category column
-    all_cols = df.columns
-    quarter_cols = [c for c in all_cols if _is_quarter_column(c)]
-    category_col = all_cols[0]  # first column is always the category label
-
-    if not quarter_cols:
-        logger.warning("No quarter columns found in %s — skipping.", filename)
-        return spark.createDataFrame([], schema=None)
-
-    # Unpivot (melt): stack all quarter columns into (quarter_label, value_raw)
-    stack_expr = f"stack({len(quarter_cols)}, " + \
-        ", ".join(f"'{q}', `{q}`" for q in quarter_cols) + \
-        ") as (quarter_label, value_raw)"
-
-    df_long = df.select(
-        F.col(category_col).alias("category"),
-        F.expr(stack_expr),
-    )
+    df = spark.read.jdbc(url=JDBC_URL, table=BRONZE_TABLE, properties=JDBC_PROPERTIES)
 
     # Cast value using try_cast (returns NULL for '-', 'n/a', empty, etc.)
-    df_long = df_long.withColumn(
+    df = df.withColumn(
         "value_numeric",
-        F.expr("try_cast(value_raw as double)")
+        F.expr("try_cast(value as double)")
     )
 
     # Multiply monetary values by 1,000,000 (source is £m)
-    if src_name in MONETARY_SOURCES:
-        df_long = df_long.withColumn(
-            "value",
+    df = df.withColumn(
+        "value",
+        F.when(
+            F.col("src").isin(list(MONETARY_SOURCES)),
             F.col("value_numeric") * F.lit(1_000_000.0)
-        )
-    else:
-        df_long = df_long.withColumn("value", F.col("value_numeric"))
+        ).otherwise(F.col("value_numeric"))
+    )
 
-    # Derive temporal columns from quarter_label
-    df_long = (
-        df_long
+    # Derive temporal columns from quarter column (e.g. "2007Q1")
+    df = (
+        df
+        .withColumnRenamed("quarter", "quarter_label")
         .withColumn("year",        F.col("quarter_label").substr(1, 4).cast("int"))
         .withColumn("quarter_num", F.col("quarter_label").substr(6, 1).cast("int"))
         .withColumn(
@@ -130,35 +82,23 @@ def _transform_one_source(
                 "yyyy-M-dd"
             ).cast(DateType())
         )
-        .withColumn("src", F.lit(src_name))
     )
 
     # Drop rows with no category or no valid date
-    df_long = (
-        df_long
+    df = (
+        df
         .filter(F.col("category").isNotNull())
         .filter(F.col("quarter_start").isNotNull())
     )
 
     # Incremental filter
     if filter_date is not None:
-        df_long = df_long.filter(F.col("quarter_start") > F.lit(filter_date))
+        logger.info("Incremental filter: quarter_start > %s", filter_date)
+        df = df.filter(F.col("quarter_start") > F.lit(filter_date))
 
-    return df_long.select(SILVER_COLUMNS)
-
-
-def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
-    """Combine all three MLAR sources into one long DataFrame."""
-    frames = []
-    for src_name, filename in MLAR_SOURCES.items():
-        df = _transform_one_source(spark, src_name, filename, filter_date)
-        frames.append(df)
-
-    from functools import reduce
-    from pyspark.sql import DataFrame as DF
-    combined = reduce(DF.union, frames)
-    logger.info("MLAR combined row count (before write): %d", combined.count())
-    return combined
+    row_count = df.count()
+    logger.info("MLAR rows to process: %d", row_count)
+    return df.select(SILVER_COLUMNS)
 
 
 def write_silver(df: DataFrame) -> None:
@@ -195,6 +135,7 @@ def write_silver(df: DataFrame) -> None:
 
 
 def update_watermark_from_db() -> None:
+    """Store MAX(quarter_start) as watermark — quarter-level granularity."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(f"SELECT MAX(quarter_start) FROM {TARGET_TABLE};")

@@ -30,7 +30,7 @@ def get_spark(app_name: str = SPARK_APP_NAME) -> SparkSession:
         # Postgres JDBC driver jar
         .config("spark.jars", JDBC_JAR_PATH)
         # Keep Spark logs quieter — only WARN and above
-        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memory", "8g")
         .config("spark.network.timeout", "800s")
         .config("spark.executor.heartbeatInterval", "120s")
         .config("spark.sql.shuffle.partitions", "8")

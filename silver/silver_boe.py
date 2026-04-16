@@ -4,12 +4,11 @@ silver/silver_boe.py
 Silver-layer transformation for the Bank of England
 Lending to Individuals (monthly) dataset.
 
-Changes vs. v1:
-  - BoE series codes (LPMB3VA etc.) mapped to friendly column names
-  - Type casting via try_cast (no regex)
-  - quarter_start and quarter_label derived here in Silver
-  - Idempotent upsert on merge key: month_start
-  - Incremental mode: filter to month_start > filter_date
+Reads from bronze.boe_raw (PostgreSQL) via PySpark JDBC.
+Bronze columns are BoE series codes (LPMB3VA etc.), mapped to friendly names here.
+Type casting via try_cast. BoE 2-digit year dates fixed with manual century prepend.
+Watermark: MAX(month_start) — month-level granularity.
+Idempotent upsert on merge key: month_start.
 """
 
 import logging
@@ -19,7 +18,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DateType, StringType
 
-from utils.config import BOE_PATH, BOE_FILENAME, JDBC_URL, JDBC_PROPERTIES
+from utils.config import JDBC_URL, JDBC_PROPERTIES
 from utils.spark_session import get_spark
 from utils.db import get_conn, drop_staging_table
 from utils.watermark import get_filter_date, set_watermark
@@ -29,10 +28,9 @@ logger = logging.getLogger(__name__)
 
 STAGING_TABLE = "silver._staging_boe"
 TARGET_TABLE  = "silver.boe_monthly_clean"
+BRONZE_TABLE  = "bronze.boe_raw"
 
 # ── BoE series code → friendly column name mapping ───────────────────────────
-# The CSV column headers end with series codes like LPMB3VA.
-# We extract the code from the header and map to our silver column names.
 BOE_CODE_TO_NAME = {
     "LPMB3VA": "mfi_house_purchase",
     "LPMB3SI": "mfi_remortgage",
@@ -56,51 +54,27 @@ SILVER_COLUMNS = [
 ] + NUMERIC_COLS
 
 
-def _rename_boe_columns(df: DataFrame) -> DataFrame:
-    """
-    Rename BoE CSV columns from long descriptions to friendly names.
-    The series code (e.g. LPMB3VA) appears at the end of each column header.
-    We find it by matching against our known codes.
-    """
-    for original_col in df.columns:
-        for code, friendly_name in BOE_CODE_TO_NAME.items():
-            if code in original_col:
-                df = df.withColumnRenamed(original_col, friendly_name)
-                break
-    return df
-
-
 def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
-    src = f"{BOE_PATH}/{BOE_FILENAME}"
-    logger.info("Reading BoE source: %s", src)
+    logger.info("Reading BoE from bronze: %s", BRONZE_TABLE)
 
-    df = (
-        spark.read
-        .option("header", "true")
-        .option("inferSchema", "false")
-        .csv(src)
-    )
+    df = spark.read.jdbc(url=JDBC_URL, table=BRONZE_TABLE, properties=JDBC_PROPERTIES)
 
-    # Rename columns from long BoE descriptions to friendly names
-    df = _rename_boe_columns(df)
+    # Rename series code columns to friendly names
+    for code, friendly_name in BOE_CODE_TO_NAME.items():
+        if code in df.columns:
+            df = df.withColumnRenamed(code, friendly_name)
 
-    # The BoE export has a 'Date' column in format '31 Jan 26' or 'Jan 1993'
-    # Normalise to first-of-month date
-    date_col = df.columns[0]  # first column is always the date
-    df = df.withColumnRenamed(date_col, "date_raw")
-    # All BoE dates are "dd MMM yy" (2-digit year).
-    # Spark's default century pivot misinterprets "26" as 2099.
-    # Prepend "20" for years 00-30, "19" for years 31-99.
+    # Fix 2-digit year dates: "31 Jan 26" → "31 Jan 2026"
     df = df.withColumn(
         "year_2d",
-        F.regexp_extract(F.col("date_raw"), r"(\d{2})$", 1)
+        F.regexp_extract(F.col("date_col"), r"(\d{2})$", 1)
     )
     df = df.withColumn(
         "date_raw_4d",
         F.concat(
-            F.regexp_extract(F.col("date_raw"), r"^(\d{1,2}\s\w{3}\s)", 1),
-            F.when(F.col("year_2d").cast("int") <= 90, F.lit("20"))
-            .otherwise(F.lit("19")),
+            F.regexp_extract(F.col("date_col"), r"^(\d{1,2}\s\w{3}\s)", 1),
+            F.when(F.col("year_2d").cast("int") <= 30, F.lit("20"))
+             .otherwise(F.lit("19")),
             F.col("year_2d"),
         )
     )
@@ -109,7 +83,7 @@ def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
         F.to_date(F.col("date_raw_4d"), "dd MMM yyyy").cast(DateType())
     )
 
-    # Cast all numeric columns using try_cast (returns NULL for non-numeric)
+    # Cast all numeric columns using try_cast
     for col_name in NUMERIC_COLS:
         if col_name in df.columns:
             df = df.withColumn(
@@ -117,7 +91,7 @@ def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
                 F.expr(f"try_cast(`{col_name}` as double)")
             )
         else:
-            logger.warning("Column %s not found in BoE data — filling with NULL", col_name)
+            logger.warning("Column %s not found — filling with NULL", col_name)
             df = df.withColumn(col_name, F.lit(None).cast("double"))
 
     df = (
@@ -177,9 +151,10 @@ def write_silver(df: DataFrame) -> None:
 
 
 def update_watermark_from_db() -> None:
+    """Store MAX(month_start) as watermark — month-level granularity."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT MAX(quarter_start) FROM {TARGET_TABLE};")
+            cur.execute(f"SELECT MAX(month_start) FROM {TARGET_TABLE};")
             result = cur.fetchone()
     if result and result[0]:
         set_watermark("boe", result[0])

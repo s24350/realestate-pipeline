@@ -3,32 +3,27 @@ silver/silver_land_registry.py
 -------------------------------
 Silver-layer transformation for the HM Land Registry Price Paid dataset.
 
-Changes vs. v1 (pure SQL):
-  - All type casting and NULL normalisation done in PySpark (not SQL)
-  - quarter_start and quarter_label derived here in Silver
-  - Idempotent upsert via staging table + INSERT ON CONFLICT
-  - Incremental mode: reads monthly update file if available
-  - Full mode: reads pp-complete.csv
-  - Uses try_cast instead of regex for numeric conversion
+Reads from bronze.land_registry_raw (PostgreSQL) via PySpark JDBC with
+partitioned reads to avoid OOM on 31M+ rows. Partitioning is done on
+transfer_date (cast to DATE in a subquery) with 16 parallel reads.
 
-Merge key: transaction_id  (the {GUID} in column A of pp-complete.csv)
+All type casting and NULL normalisation done in PySpark.
+quarter_start and quarter_label derived here in Silver.
+Idempotent upsert via staging table + INSERT ON CONFLICT.
+
+Watermark: MAX(transfer_date) — date-level granularity.
+Incremental filter: transfer_date > watermark.
+Merge key: transaction_id (the {GUID} stripped of braces).
 """
 
 import logging
 from datetime import date
-from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DateType, DecimalType, StringType, StructField, StructType
-)
+from pyspark.sql.types import DateType, StringType
 
-from utils.config import (
-    LAND_REGISTRY_PATH, LAND_REGISTRY_FILENAME,
-    LAND_REGISTRY_MONTHLY_FILENAME,
-    JDBC_URL, JDBC_PROPERTIES,
-)
+from utils.config import JDBC_URL, JDBC_PROPERTIES
 from utils.spark_session import get_spark
 from utils.db import get_conn, drop_staging_table
 from utils.watermark import get_filter_date, set_watermark
@@ -36,28 +31,6 @@ from utils.watermark import get_filter_date, set_watermark
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Schema ────────────────────────────────────────────────────────────────────
-# Land Registry pp-complete.csv has no header row — column names are positional
-LR_SCHEMA = StructType([
-    StructField("transaction_id",   StringType(),  True),
-    StructField("price_raw",        StringType(),  True),
-    StructField("transfer_date_raw",StringType(),  True),
-    StructField("postcode",         StringType(),  True),
-    StructField("property_type",    StringType(),  True),
-    StructField("old_new",          StringType(),  True),
-    StructField("duration",         StringType(),  True),
-    StructField("paon",             StringType(),  True),
-    StructField("saon",             StringType(),  True),
-    StructField("street",           StringType(),  True),
-    StructField("locality",         StringType(),  True),
-    StructField("town_city",        StringType(),  True),
-    StructField("district",         StringType(),  True),
-    StructField("county",           StringType(),  True),
-    StructField("ppd_category",     StringType(),  True),
-    StructField("record_status",    StringType(),  True),
-])
-
-# Columns that must be present after transformation to write to Silver
 SILVER_COLUMNS = [
     "transaction_id", "transfer_date", "price_gbp", "postcode",
     "property_type", "old_new", "duration", "paon", "saon", "street",
@@ -67,46 +40,75 @@ SILVER_COLUMNS = [
 
 STAGING_TABLE = "silver._staging_land_registry"
 TARGET_TABLE  = "silver.land_registry_clean"
+BRONZE_TABLE  = "bronze.land_registry_raw"
 
 
-# ── Source file selection ─────────────────────────────────────────────────────
-
-def _resolve_source_file(mode: str) -> str:
+def _get_date_bounds(spark: SparkSession) -> tuple[str, str]:
     """
-    Decide which CSV to read based on mode:
-      - full:        always pp-complete.csv (full history ~5 GB)
-      - incremental: prefer pp-monthly-update-new-version.csv if it exists,
-                     otherwise fall back to pp-complete.csv (watermark will
-                     filter to only new rows anyway)
+    Query bronze for min/max transfer_date to set JDBC partition bounds.
+    Returns (min_date, max_date) as strings like '1995-01-01'.
     """
-    if mode == "incremental":
-        monthly = Path(LAND_REGISTRY_PATH) / LAND_REGISTRY_MONTHLY_FILENAME
-        if monthly.exists() and monthly.stat().st_size > 0:
-            logger.info("Incremental mode: using monthly update file %s", monthly)
-            return str(monthly)
-        logger.info(
-            "Incremental mode: monthly file not found, "
-            "falling back to full file with watermark filter."
-        )
-    return f"{LAND_REGISTRY_PATH}/{LAND_REGISTRY_FILENAME}"
+    bounds_query = """
+        (SELECT
+            MIN(TO_DATE(transfer_date, 'YYYY-MM-DD HH24:MI'))::TEXT AS min_dt,
+            MAX(TO_DATE(transfer_date, 'YYYY-MM-DD HH24:MI'))::TEXT AS max_dt
+         FROM bronze.land_registry_raw
+         WHERE transaction_id IS NOT NULL AND transfer_date IS NOT NULL
+        ) AS bounds
+    """
+    bounds_df = spark.read.jdbc(
+        url=JDBC_URL, table=bounds_query, properties=JDBC_PROPERTIES
+    )
+    row = bounds_df.collect()[0]
+    logger.info("Date bounds: min=%s, max=%s", row["min_dt"], row["max_dt"])
+    return row["min_dt"], row["max_dt"]
 
 
-# ── Transform ─────────────────────────────────────────────────────────────────
+def transform(spark: SparkSession, filter_date: date | None) -> DataFrame:
+    """
+    Read bronze LR table with partitioned JDBC reads (16 partitions by date).
+    Each partition reads ~2M rows — well within driver memory.
+    PySpark does all transformations (type casting, NULL handling, quarter derivation).
+    """
+    logger.info("Reading Land Registry from bronze with partitioned JDBC reads")
 
-def transform(
-    spark: SparkSession,
-    filter_date: date | None,
-    mode: str = "full",
-) -> DataFrame:
-    src = _resolve_source_file(mode)
-    logger.info("Reading Land Registry source: %s", src)
+    # Get date range for partition bounds
+    min_dt, max_dt = _get_date_bounds(spark)
+    # Convert to epoch days for numeric partitioning
+    from datetime import datetime
+    min_epoch = (datetime.strptime(min_dt, "%Y-%m-%d") - datetime(1970, 1, 1)).days
+    max_epoch = (datetime.strptime(max_dt, "%Y-%m-%d") - datetime(1970, 1, 1)).days
+
+    # Build subquery that adds a DATE column for partitioning
+    # PostgreSQL casts transfer_date TEXT → DATE for the partition column
+    where_clause = ""
+    if filter_date is not None:
+        where_clause = f"AND TO_DATE(transfer_date, 'YYYY-MM-DD HH24:MI') > '{filter_date}'"
+        logger.info("Incremental filter: transfer_date > %s", filter_date)
+
+    bronze_query = f"""
+            (SELECT *,
+                TO_DATE(transfer_date, 'YYYY-MM-DD HH24:MI') AS partition_date,
+                (TO_DATE(transfer_date, 'YYYY-MM-DD HH24:MI') - DATE '1970-01-01') AS partition_days
+             FROM bronze.land_registry_raw
+             WHERE transaction_id IS NOT NULL
+               AND transfer_date IS NOT NULL
+               {where_clause}
+            ) AS lr_bronze
+        """
 
     df = (
         spark.read
-        .option("header", "false")
-        .option("inferSchema", "false")
-        .schema(LR_SCHEMA)
-        .csv(src)
+        .option("fetchsize", "10000")
+        .jdbc(
+            url=JDBC_URL,
+            table=bronze_query,
+            properties=JDBC_PROPERTIES,
+            column="partition_days",
+            lowerBound=min_epoch,
+            upperBound=max_epoch,
+            numPartitions=16,
+        )
     )
 
     df = (
@@ -117,17 +119,14 @@ def transform(
             F.regexp_replace(F.col("transaction_id"), r"[{}]", "")
         )
 
-        # 2. Cast price to numeric using try_cast (NULL for non-numeric)
+        # 2. Cast price to numeric using try_cast
         .withColumn(
             "price_gbp",
-            F.expr("try_cast(price_raw as decimal(14,2))")
+            F.expr("try_cast(price as decimal(14,2))")
         )
 
-        # 3. Parse transfer_date (format: "2024-01-15 00:00")
-        .withColumn(
-            "transfer_date",
-            F.to_date(F.col("transfer_date_raw"), "yyyy-MM-dd HH:mm")
-        )
+        # 3. Use the already-parsed partition_date as transfer_date
+        .withColumn("transfer_date", F.col("partition_date").cast(DateType()))
 
         # 4. Normalise property_type, old_new, duration to uppercase single char
         .withColumn("property_type", F.upper(F.trim(F.col("property_type"))))
@@ -144,17 +143,13 @@ def transform(
         .withColumn("district",  F.nullif(F.trim(F.col("district")),  F.lit("")))
         .withColumn("county",    F.nullif(F.trim(F.col("county")),    F.lit("")))
 
-        # 6. Drop rows with no transaction_id or no valid date
-        .filter(F.col("transaction_id").isNotNull())
-        .filter(F.col("transfer_date").isNotNull())
-
-        # 7. Derive quarter_start = first day of the quarter
+        # 6. Derive quarter_start = first day of the quarter
         .withColumn(
             "quarter_start",
             F.date_trunc("quarter", F.col("transfer_date")).cast(DateType())
         )
 
-        # 8. Derive quarter_label e.g. "2025Q4"
+        # 7. Derive quarter_label e.g. "2025Q4"
         .withColumn(
             "quarter_label",
             F.concat(
@@ -164,19 +159,12 @@ def transform(
             )
         )
 
-        # 9. Drop raw helper columns
-        .drop("price_raw", "transfer_date_raw")
+        # 8. Drop helper columns
+        .drop("price", "partition_date")
     )
-
-    # 10. Incremental filter
-    if filter_date is not None:
-        logger.info("Incremental filter: quarter_start > %s", filter_date)
-        df = df.filter(F.col("quarter_start") > F.lit(filter_date))
 
     return df.select(SILVER_COLUMNS)
 
-
-# ── Write ─────────────────────────────────────────────────────────────────────
 
 def write_silver(df: DataFrame) -> None:
     row_count = df.count()
@@ -190,7 +178,7 @@ def write_silver(df: DataFrame) -> None:
         df.write
         .mode("overwrite")
         .option("truncate", "true")
-        .option("batchsize", "10000")
+        .option("batchsize", "50000")
         .jdbc(
             url=JDBC_URL,
             table=STAGING_TABLE,
@@ -198,7 +186,6 @@ def write_silver(df: DataFrame) -> None:
         )
     )
 
-    # UPSERT from staging → target
     upsert_sql = f"""
         INSERT INTO {TARGET_TABLE} ({', '.join(SILVER_COLUMNS)}, loaded_at)
         SELECT {', '.join(SILVER_COLUMNS)}, NOW()
@@ -224,11 +211,10 @@ def write_silver(df: DataFrame) -> None:
 
 
 def update_watermark_from_db() -> None:
+    """Store MAX(transfer_date) as watermark — date-level granularity."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT MAX(quarter_start) FROM {TARGET_TABLE};"
-            )
+            cur.execute(f"SELECT MAX(transfer_date) FROM {TARGET_TABLE};")
             result = cur.fetchone()
 
     if result and result[0]:
@@ -241,7 +227,7 @@ def run(mode: str = "full") -> None:
 
     spark = get_spark("silver-land-registry")
     try:
-        df = transform(spark, filter_date, mode=mode)
+        df = transform(spark, filter_date)
         write_silver(df)
         update_watermark_from_db()
     finally:
