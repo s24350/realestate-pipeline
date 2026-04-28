@@ -12,8 +12,8 @@ description: >
 
 product:
   name: "UK Housing & Credit Market — Quarterly Monitor"
-  owner: "[Your Name]"
-  contact: "[Your Email]"
+  owner: "Krzysztof Rutkowski"
+  contact: "s24350@pjwstk.edu.pl"
   domain: "Real estate / Financial services"
   primary_users: "Data analysts, researchers, students exploring UK housing trends"
   purpose: >
@@ -184,8 +184,8 @@ limitations:
   - "The latest quarter (2026Q1) may be incomplete if source files have not been fully updated by the publishing agencies."
 
 owners:
-  producer: "[Your Name]"
-  contact: "[Your Email]"
+  producer: "Krzysztof Rutkowski"
+  contact: "s24350@pjwstk.edu.pl"
   course: "PJATK — Big Data (BGD), 2025/2026"
 
 security:
