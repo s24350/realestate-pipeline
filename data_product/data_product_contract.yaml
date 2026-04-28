@@ -1,0 +1,192 @@
+# Data Product Contract — UK Housing & Credit Market
+# Based on Open Data Contract Standard (ODCS)
+# Repository: https://github.com/s24350/realestate-pipeline
+
+dataset: uk_housing_credit_quarterly
+version: "2.0"
+description: >
+  Quarterly analytical dataset combining UK property transaction data (HM Land Registry),
+  mortgage approval counts (Bank of England), and mortgage lending flows (MLAR/FCA)
+  into a single denormalized table. Covers 132 quarters from 1993Q2 to 2026Q1.
+  Full three-source coverage from 2007Q1 onwards.
+
+product:
+  name: "UK Housing & Credit Market — Quarterly Monitor"
+  owner: "[Your Name]"
+  contact: "[Your Email]"
+  domain: "Real estate / Financial services"
+  primary_users: "Data analysts, researchers, students exploring UK housing trends"
+  purpose: >
+    Enables quarterly analysis of the UK housing market by joining property prices
+    and transaction volumes with mortgage approval counts and regulated lending flows.
+    Supports trend analysis, market health monitoring, and cross-source correlation studies.
+
+schema:
+  - name: quarter_start_date
+    type: date
+    nullable: false
+    description: "First day of the quarter — primary key"
+    example: "2024-01-01"
+
+  - name: quarter_label
+    type: string
+    nullable: false
+    description: "Human-readable quarter label"
+    example: "2024Q1"
+
+  - name: transactions_total_lr_count
+    type: bigint
+    nullable: true
+    description: "Total property transactions registered in the quarter (Land Registry)"
+    example: "248225"
+
+  - name: price_avg_lr_gbp
+    type: numeric
+    nullable: true
+    description: "Average property transaction price in GBP"
+    example: "362540.18"
+
+  - name: price_median_lr_gbp
+    type: numeric
+    nullable: true
+    description: "Median property transaction price in GBP"
+    example: "280000.00"
+
+  - name: price_min_lr_gbp
+    type: numeric
+    nullable: true
+    description: "Minimum transaction price in the quarter (GBP). Includes nominal £1 transfers between family members."
+    example: "1.00"
+
+  - name: price_max_lr_gbp
+    type: numeric
+    nullable: true
+    description: "Maximum transaction price in the quarter (GBP)"
+    example: "132000000.00"
+
+  - name: boe_house_purchase_lpmvtvx_count
+    type: numeric
+    nullable: true
+    description: "BoE mortgage approvals for house purchase — quarterly average of monthly values"
+    example: "64588"
+
+  - name: boe_remortgage_lpmb4b3_count
+    type: numeric
+    nullable: true
+    description: "BoE mortgage approvals for remortgaging — quarterly average of monthly values"
+    example: "37787"
+
+  - name: boe_total_secured_lending_lpmb3c8_count
+    type: numeric
+    nullable: true
+    description: "BoE total secured lending approvals — quarterly average of monthly values. Series starts from 1997Q4."
+    example: "115089"
+
+  - name: boe_mfi_total_approvals_lpmz3up_count
+    type: numeric
+    nullable: true
+    description: "BoE monetary financial institutions total approvals — quarterly average"
+    example: "109329"
+
+  - name: mlar_gross_advances_mlar_1_21_c_1_gbp
+    type: numeric
+    nullable: true
+    description: "MLAR regulated business flows — gross advances (GBP, converted from £m)"
+    example: "73592296000"
+
+  - name: mlar_net_advances_mlar_1_21_c_2_gbp
+    type: numeric
+    nullable: true
+    description: "MLAR regulated business flows — net advances (GBP, converted from £m)"
+    example: "12340000000"
+
+  - name: mlar_new_commitments_mlar_1_21_c_3_gbp
+    type: numeric
+    nullable: true
+    description: "MLAR regulated business flows — new commitments (GBP, converted from £m)"
+    example: "85200000000"
+
+  - name: mlar_imp_repayment_mlar_1_32_c_3_pct
+    type: numeric
+    nullable: true
+    description: "MLAR impaired credit history — repayment advances as percentage"
+    example: "3.745"
+
+  - name: mlar_imp_interest_only_mlar_1_32_c_4_pct
+    type: numeric
+    nullable: true
+    description: "MLAR impaired credit history — interest-only advances as percentage"
+    example: "1.220"
+
+  - name: mlar_new_house_purchase_mlar_1_33_c_29_gbp
+    type: numeric
+    nullable: true
+    description: "MLAR new house purchase advances (GBP, converted from £m)"
+    example: "47253000000"
+
+  - name: mlar_new_remortgage_mlar_1_33_c_30_gbp
+    type: numeric
+    nullable: true
+    description: "MLAR new remortgage advances (GBP, converted from £m)"
+    example: "28500000000"
+
+quality_rules:
+  - rule: ExpectColumnValuesNotToBeNull
+    target: quarter_start_date
+    condition: "NOT NULL"
+
+  - rule: ExpectColumnValuesToBeUnique
+    target: quarter_start_date
+    condition: "UNIQUE"
+
+  - rule: ExpectColumnValuesToBeGreaterThan
+    target: transactions_total_lr_count
+    condition: "> 0"
+    note: "Applies to quarters where Land Registry data is available (from 1995Q1)"
+
+SLA:
+  refresh_frequency: "Quarterly (aligned with MLAR publication cycle)"
+  max_delay: "30 days after quarter end"
+  retention: "Indefinite — historical data preserved"
+  update_trigger: "Airflow DAG — scheduled daily, processes only new data via watermark"
+
+access:
+  method: "SQLite file download from GitHub repository"
+  location: "https://github.com/s24350/realestate-pipeline/tree/main/data_product"
+  formats:
+    - "SQLite database: housing_credit_quarterly.db"
+    - "CSV file: housing_credit_quarterly.csv"
+  instructions: "Download the .db or .csv file. Open with Python (sqlite3/pandas), DBeaver, DB Browser, Excel, or any SQL-compatible tool."
+  credentials: "None required — public repository"
+
+sources:
+  - name: "HM Land Registry — Price Paid Data"
+    type: "CSV file (government open data)"
+    refresh: "Monthly"
+    url: "https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads"
+
+  - name: "Bank of England — Lending to Individuals (A5.4)"
+    type: "CSV file (central bank statistics)"
+    refresh: "Monthly"
+    url: "https://www.bankofengland.co.uk/boeapps/database/fromshowcolumns.asp"
+
+  - name: "MLAR — Mortgage Lenders & Administrators Return"
+    type: "XLSX file (FCA/BoE quarterly publication)"
+    refresh: "Quarterly"
+    url: "https://www.bankofengland.co.uk/statistics/details/further-details-about-mortgage-lenders-and-administrators-statistics-data"
+
+limitations:
+  - "Full three-source coverage starts from 2007Q1. Quarters before 2007 have no MLAR data; quarters before 1995 have no Land Registry data."
+  - "BoE series coverage varies: house purchase approvals (LPMVTVX) and MFI total approvals (LPMZ3UP) are complete from 1993. Remortgage (LPMB4B3) and total secured lending (LPMB3C8) series begin from 1997Q4. All BoE columns are fully complete from 2000Q1 onwards."
+  - "MLAR monetary values are converted from millions (£m) to full GBP (×1,000,000) — values in the billions range are expected and correct."
+  - "BoE columns represent quarterly averages of monthly approval counts, not quarterly totals."
+  - "Price range includes £1 transactions. According to HM Land Registry, these are private transfers between family members recorded at nominal consideration — they are genuine registry records, not data errors (1st percentile: £20,000, 99th percentile: £1,212,500)."
+  - "The latest quarter (2026Q1) may be incomplete if source files have not been fully updated by the publishing agencies."
+
+owners:
+  producer: "[Your Name]"
+  contact: "[Your Email]"
+  course: "PJATK — Big Data (BGD), 2025/2026"
+
+security:
+  classification: "Public — UK government open data"
