@@ -9,6 +9,7 @@ postgres_data/
 !data/
 !data/*/
 !data/**/.gitkeep
+!data_product/*.csv
 
 # Python
 __pycache__/
