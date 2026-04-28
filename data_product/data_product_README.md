@@ -42,6 +42,31 @@ df = pd.read_csv("housing_credit_quarterly.csv")
 
 ---
 
+
+## Quick Visualization Example
+
+Once you have downloaded the CSV, paste the code below to create your first visualization — no additional setup required.
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_csv("housing_credit_quarterly.csv")
+df["price_avg__LR__gbp"] = pd.to_numeric(df["price_avg__LR__gbp"], errors="coerce")
+df["quarter_start__date"] = pd.to_datetime(df["quarter_start__date"])
+df = df.dropna(subset=["price_avg__LR__gbp"]).sort_values("quarter_start__date")
+
+plt.figure(figsize=(12, 4))
+plt.plot(df["quarter_start__date"], df["price_avg__LR__gbp"])
+plt.title("Average House Price (GBP) — 1995 to 2026")
+plt.ylabel("GBP")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+You should see a chart of average UK house prices over 30+ years — useful as a quick sanity check that the data loaded correctly.
+
+---
 ## Schema
 
 | Column | Type | Description |
