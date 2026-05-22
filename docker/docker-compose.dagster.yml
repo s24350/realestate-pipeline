@@ -1,0 +1,142 @@
+# docker/docker-compose.dagster.yml
+# -----------------------------------------------------------------------------
+# Dagster stack for the UK Real Estate pipeline.
+#
+# This is a SEPARATE compose file from docker-compose.yml (the Airflow stack),
+# so `main`'s Airflow setup stays untouched. Run it explicitly with -f (see the
+# boot command in the chat).
+#
+# It reuses the SAME postgres service definition and mounts the SAME module
+# folders (bronze/silver/gold/utils/sql/jars/data) as Airflow does, so both
+# orchestrators execute byte-identical business logic against the same database.
+#
+# Mounts mirror docker-compose.yml but target /opt/dagster/app instead of
+# /opt/airflow, and the project root is added to PYTHONPATH so `from silver...`
+# imports resolve exactly as they do in Airflow.
+# -----------------------------------------------------------------------------
+
+x-dagster-common: &dagster-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.dagster
+  environment:
+    DAGSTER_HOME: /opt/dagster/home
+    # Make the shared pipeline modules importable (Airflow uses sys.path.insert;
+    # here we set PYTHONPATH to the mounted project root for the same effect).
+    PYTHONPATH: /opt/dagster/app
+    # Pipeline DB connection — identical values to the Airflow stack.
+    PIPELINE_DB_URL: postgresql+psycopg2://pipeline:pipeline@postgres/pipeline_db
+    PIPELINE_DB_HOST: postgres
+    PIPELINE_DB_PORT: "5432"
+    PIPELINE_DB_NAME: pipeline_db
+    PIPELINE_DB_USER: pipeline
+    PIPELINE_DB_PASSWORD: pipeline
+    # Kafka — same as Airflow.
+    KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    KAFKA_TOPIC: file-events
+    # Data paths inside the container — config.py reads these.
+    BASE_DATA_PATH: /opt/dagster/app/data
+    LAND_REGISTRY_PATH: /opt/dagster/app/data/land_registry
+    BOE_PATH: /opt/dagster/app/data/boe
+    MLAR_PATH: /opt/dagster/app/data/mlar
+  volumes:
+    # The Dagster code location.
+    - ../dagster_project:/opt/dagster/app/dagster_project
+    # Shared business logic + data + jars + sql — same as the Airflow stack.
+    - ../bronze:/opt/dagster/app/bronze
+    - ../silver:/opt/dagster/app/silver
+    - ../gold:/opt/dagster/app/gold
+    - ../utils:/opt/dagster/app/utils
+    - ../ingestion:/opt/dagster/app/ingestion
+    - ../preprocessing:/opt/dagster/app/preprocessing
+    - ../sql:/opt/dagster/app/sql
+    - ../jars:/opt/dagster/app/jars
+    - ../data:/opt/dagster/app/data
+    # Dagster instance config + persistent home (run/event history).
+    - dagster-home:/opt/dagster/home
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - pipeline-net
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Same definition as docker-compose.yml. If the Airflow stack is already up,
+  # this reuses the running container; otherwise it starts one.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - pipeline-net
+
+  # ── Zookeeper + Kafka ────────────────────────────────────────────────────────
+  # Same as the Airflow stack — needed because the pipeline's bronze step
+  # publishes/consumes file-events.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - pipeline-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+    networks:
+      - pipeline-net
+
+  # ── Dagster webserver (the UI) ───────────────────────────────────────────────
+  dagster-webserver:
+    <<: *dagster-common
+    command:
+      - dagster-webserver
+      - -h
+      - "0.0.0.0"
+      - -p
+      - "3000"
+      - -m
+      - dagster_project.definitions
+    ports:
+      - "3000:3000"
+    restart: always
+
+  # ── Dagster daemon (schedules, sensors, run queue) ───────────────────────────
+  # Needed from Step 6 (schedules) and Step 7 (backfills); harmless to run now.
+  dagster-daemon:
+    <<: *dagster-common
+    command:
+      - dagster-daemon
+      - run
+    restart: always
+
+volumes:
+  postgres-data:
+  dagster-home:
+
+networks:
+  pipeline-net:
+    driver: bridge

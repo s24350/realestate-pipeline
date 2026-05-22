@@ -1,0 +1,50 @@
+# docker/Dockerfile.dagster
+# -----------------------------------------------------------------------------
+# Dagster image for the UK Real Estate pipeline.
+#
+# Deliberately mirrors Dockerfile.airflow so the comparison is fair:
+#   - same OpenJDK 17 (PySpark needs Java identically under either orchestrator)
+#   - same requirements.txt (same PySpark/JDBC/pandas stack)
+# The ONLY additions are the Dagster packages themselves. This symmetry is itself
+# a finding for comparison point 1.3 (config/runtime differences).
+# -----------------------------------------------------------------------------
+
+FROM python:3.11-slim-bookworm
+
+# --- System deps: Java 17 (PySpark) + procps (Spark uses `ps`) ---------------
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-17-jdk-headless \
+        procps \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Unbuffered logs show up immediately in `docker logs`
+ENV PYTHONUNBUFFERED=1
+
+# Dagster needs a home dir for its instance config (dagster.yaml) + local storage
+ENV DAGSTER_HOME=/opt/dagster/home
+RUN mkdir -p $DAGSTER_HOME
+
+# --- Python deps -------------------------------------------------------------
+# Install psycopg2-binary FIRST (avoids a known dagster-postgres build ordering
+# issue), then the pipeline requirements, then Dagster pinned to a stable version.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir "psycopg2-binary==2.9.9"
+
+# Pipeline requirements (PySpark 3.5.1, pandas, kafka, etc.) — same stack as Airflow.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Dagster itself — pinned so a future release can't break the project mid-port.
+RUN pip install --no-cache-dir \
+        "dagster==1.13.3" \
+        "dagster-webserver==1.13.3"
+
+# The Dagster instance config (storage backend, etc.) lives here.
+COPY docker/dagster.yaml $DAGSTER_HOME/dagster.yaml
+
+WORKDIR /opt/dagster/app

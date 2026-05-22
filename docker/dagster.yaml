@@ -1,0 +1,20 @@
+# docker/dagster.yaml
+# -----------------------------------------------------------------------------
+# Dagster *instance* configuration (not pipeline config).
+# Controls where Dagster stores its own run history, event logs, and schedule
+# state — separate from your pipeline_db.
+#
+# We deliberately keep this on local SQLite inside a named Docker volume, NOT in
+# pipeline_db. Reason: the equivalence gate hashes gold.housing_credit_summary in
+# pipeline_db. Keeping Dagster's internal tables out of that database guarantees
+# Dagster can never pollute the data we're comparing.
+#
+# DAGSTER_HOME (set in the Dockerfile) points here. When these storage keys are
+# omitted, Dagster defaults to SQLite under $DAGSTER_HOME — which is exactly what
+# we want, persisted via the dagster-home volume in the compose file.
+# -----------------------------------------------------------------------------
+
+# Leaving storage unspecified => Dagster uses local SQLite under $DAGSTER_HOME.
+# Explicit telemetry opt-out keeps runs reproducible/offline-friendly.
+telemetry:
+  enabled: false
