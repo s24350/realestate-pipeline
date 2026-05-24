@@ -6,8 +6,18 @@ The Dagster entry point — the equivalent of Airflow finding dags/ folder.
 """
 
 from dagster import Definitions
-from dagster_project.assets import silver_boe
+from dagster_project.assets import (
+    silver_boe,
+    silver_mlar,
+    silver_land_registry,
+    gold_aggregations,
+)
 
 defs = Definitions(
-    assets=[silver_boe],
+    assets=[
+        silver_boe,
+        silver_mlar,
+        silver_land_registry,
+        gold_aggregations,
+    ],
 )
