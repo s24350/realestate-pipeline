@@ -31,8 +31,9 @@ x-dagster-common: &dagster-common
     PIPELINE_DB_NAME: pipeline_db
     PIPELINE_DB_USER: pipeline
     PIPELINE_DB_PASSWORD: pipeline
-    # JDBC
+    # JDBC and SQL
     JDBC_JAR_PATH: /opt/dagster/app/jars/postgresql-42.7.3.jar
+    SQL_PATH: /opt/dagster/app/sql
     # Kafka — same as Airflow.
     KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     KAFKA_TOPIC: file-events

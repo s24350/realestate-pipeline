@@ -5,16 +5,22 @@ Dagster entry point. Lists everything the webserver and daemon need to know abou
 The Dagster entry point — the equivalent of Airflow finding dags/ folder.
 """
 
-from dagster import Definitions
+import dagster as dg
 from dagster_project.assets import (
+    publish_to_kafka,
+    load_bronze,
+    init_schemas,
     silver_boe,
     silver_mlar,
     silver_land_registry,
     gold_aggregations,
 )
 
-defs = Definitions(
+defs = dg.Definitions(
     assets=[
+        publish_to_kafka,
+        load_bronze,
+        init_schemas,
         silver_boe,
         silver_mlar,
         silver_land_registry,
